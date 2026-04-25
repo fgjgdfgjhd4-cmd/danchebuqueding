@@ -17,7 +17,7 @@ from ac_gdpo_agent import AC_GDPO_Agent
 # 配置参数
 # ==========================================
 CONFIG = {
-    "MODEL_PATH": "results/AC_GDPO_Curriculum_20260424_202614/best_stage4_model.pth", # [请修改] 您的模型路径
+    "MODEL_PATH": "results/AC_GDPO_Curriculum_20260425_112354/best_stage4_model.pth", # [请修改] 您的模型路径
     "HIDDEN_DIM": 128,           # 必须与训练时一致
     "MAX_STEPS": 1000,           # 测试时可以给多一点步数，防止因为走得慢被截断
     "DEVICE": "cuda" if torch.cuda.is_available() else "cpu",
