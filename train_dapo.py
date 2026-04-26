@@ -303,11 +303,16 @@ def train():
             # DAPO 需要知道哪些数据属于同一个 Group (同一个 Task 的并行采样)
             # 形状变换: (Total_Batch, ) -> (Num_Groups, Group_Size)
             num_groups = batch['rewards'].shape[0] // CONFIG["NUM_ENVS"]
-            
+
             grouped_rewards = batch['rewards'].view(num_groups, CONFIG["NUM_ENVS"])
             grouped_success = batch['success'].view(num_groups, CONFIG["NUM_ENVS"])
-            grouped_lengths = batch['lengths'].view(num_groups, CONFIG["NUM_ENVS"])
-            
+
+            # [绕开 dapo_agent Bug] lengths 保持 1D flat 传入，因为
+            # soft_overlong_punishment 内部 for length in path_lengths 遍历第 0 维，
+            # flatten -> 每个 length 是标量，不会触发 boolean ambiguity RuntimeError。
+            # punishments 再 view_as(group_rewards) reshape 回 (G, G_size) 仍然合法。
+            flat_lengths = batch['lengths']  # (Total_Batch,) 不 reshape
+
             # 3. 构造存储字典
             storage = {
                 'obs': batch['obs'],             # Flat: (B, T, D)
@@ -316,17 +321,17 @@ def train():
                 'hidden_states': batch['hidden_states'], # Flat
                 'rewards': grouped_rewards,      # Reshaped: (G_num, G_size)
                 'success': grouped_success,      # Reshaped: (G_num, G_size)
-                'lengths': grouped_lengths       # Reshaped: (G_num, G_size)
+                'lengths': flat_lengths          # Flat: (Total_Batch,) 不 reshape
             }
-            
+
             for epoch in range(CONFIG["UPDATE_EPOCHS"]):
-                # 调用 DAPO update
-                # 注意：确保您的 dapo_agent.py 已修复了 soft_overlong_punishment 中的 RuntimeError
-                info = algo.update(storage)
-                
-                # update 可能返回 None (如果所有组都被动态采样过滤掉了)
-                if info:
-                    update_info = info
+                # 调用 DAPO update (返回 float, 非 dict)
+                loss_val = algo.update(storage)
+
+                # [绕开 dapo_agent Bug] algo.update 返回 loss.item() 是 float，
+                # 在调用处包装成 dict 以兼容后续的 update_info.get('loss', 0)
+                if loss_val is not None:
+                    update_info = {'loss': loss_val}
             
             batch_buffer = [] 
             update_happened = True

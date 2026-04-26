@@ -128,7 +128,8 @@ def train():
     # GRU 隐状态初始化 (训练环境)
     hidden_states = torch.zeros(1, NUM_ENVS, HIDDEN_DIM).to(device)
     
-    last_entropy = 1.0 
+    last_entropy = 1.0
+    next_save_step = 50000  # 下一个保存里程碑
 
     print("Starting training...")
 
@@ -160,12 +161,13 @@ def train():
                     'hidden': hidden_states[:, i:i+1, :].clone()
                 })
             
+            obs = next_obs
+            hidden_states = next_hidden
+            # [fix] 先更新 hidden_states = next_hidden，再在 next_hidden 上重置 done envs。
+            # 旧代码在 old hidden_states 上重置然后被 next_hidden 覆盖，导致重置无效。
             dones = np.logical_or(terminations, truncations)
             if np.any(dones):
                 hidden_states[:, torch.tensor(dones).to(device), :] = 0.0
-                
-            obs = next_obs
-            hidden_states = next_hidden
             step_rewards.append(np.mean(rewards))
             global_step += NUM_ENVS
             
@@ -230,17 +232,27 @@ def train():
             print(f"[Visualization] Episode finished in {vis_step} steps.\n")
             # 跑完后关闭窗口，或者保持窗口下一次继续用(这里不close，复用窗口)
 
-        # ... (E. 日志记录保持不变) ...
+        # ... (E. 日志记录) ...
         avg_step_reward = np.mean(step_rewards)
         if global_step % (NUM_ENVS * ROLLOUT_STEPS * 5) == 0:
-            # ... (Log logic) ...
-            print(f"Step: {global_step} | Loss: {update_info['loss']:.4f} | Avg R: {avg_step_reward:.2f} ...")
-            # ... (Tensorboard logic) ...
+            # 终端输出
+            print(f"Step: {global_step} | Loss: {update_info['loss']:.4f} | "
+                  f"Avg R: {avg_step_reward:.2f} | Safe R: {update_info.get('avg_reward_safe', 0):.2f} | "
+                  f"Safety: {update_info.get('safety_trigger_rate', 0):.2f} | "
+                  f"KL: {update_info.get('kl', 0):.4f}")
+            # TensorBoard 日志
+            writer.add_scalar("Train/Loss", update_info['loss'], global_step)
+            writer.add_scalar("Train/Avg_Reward", avg_step_reward, global_step)
+            writer.add_scalar("Train/Safe_Reward", update_info.get('avg_reward_safe', 0), global_step)
+            writer.add_scalar("Train/Safety_Trigger_Rate", update_info.get('safety_trigger_rate', 0), global_step)
+            writer.add_scalar("Train/KL", update_info.get('kl', 0), global_step)
+            writer.add_scalar("Train/Entropy_Loss", update_info.get('entropy_loss', 0), global_step)
 
-        # ... (F. 模型保存保持不变) ...
-        if global_step % 50000 == 0:
+        # ... (F. 模型保存) ...
+        if global_step >= next_save_step:
             save_path = os.path.join(model_dir, f"model_{global_step}.pth")
             algo.save(save_path)
+            next_save_step += 50000
 
     # 训练结束
     envs.close()
