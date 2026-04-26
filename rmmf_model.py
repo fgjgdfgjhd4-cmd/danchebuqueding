@@ -23,6 +23,7 @@ class RMMF_ActorCritic(nn.Module):
         super(RMMF_ActorCritic, self).__init__()
         
         # --- 1. 参数定义 ---
+        self.observation_dim = observation_dim
         self.hidden_dim = hidden_dim
         # 观测空间切分点: 前8维是本体信息(位置/朝向/目标), 后16维是雷达
         self.split_idx = 8 
@@ -63,14 +64,30 @@ class RMMF_ActorCritic(nn.Module):
 
         # --- 3. 多模态融合层 (Fusion Layer) ---
         # 输入: 本体特征(64) + 雷达特征(64) = 128
-        self.fusion_net = nn.Sequential(
+        self.proprio_proj = layer_init(nn.Linear(64, hidden_dim))
+        self.lidar_proj = layer_init(nn.Linear(64, hidden_dim))
+        self.modality_gate = nn.Sequential(
             layer_init(nn.Linear(64 + 64, hidden_dim)),
+            nn.Sigmoid()
+        )
+        self.fusion_net = nn.Sequential(
+            layer_init(nn.Linear(hidden_dim * 3, hidden_dim)),
             nn.ReLU()
         )
+        self.feature_norm = nn.LayerNorm(hidden_dim)
 
         # --- 4. 时序信念编码器 (GRU Memory) ---
         # 核心模块: 将当前融合特征与历史记忆结合，形成 Belief State
         self.gru = nn.GRU(hidden_dim, hidden_dim, batch_first=True)
+        self.memory_refine = nn.Sequential(
+            layer_init(nn.Linear(hidden_dim, hidden_dim)),
+            nn.Tanh()
+        )
+        self.memory_gate = nn.Sequential(
+            layer_init(nn.Linear(hidden_dim * 2, hidden_dim)),
+            nn.Sigmoid()
+        )
+        self.memory_norm = nn.LayerNorm(hidden_dim)
 
         # --- 5. 决策头 (Decoupled Heads) ---
         
@@ -113,8 +130,14 @@ class RMMF_ActorCritic(nn.Module):
         lidar_feat = self.lidar_fc(lidar_feat_raw)
 
         # 4. 融合
-        fusion_input = torch.cat([proprio_feat, lidar_feat], dim=1)
-        fused_feat = self.fusion_net(fusion_input)
+        proprio_proj = self.proprio_proj(proprio_feat)
+        lidar_proj = self.lidar_proj(lidar_feat)
+        gate = self.modality_gate(torch.cat([proprio_feat, lidar_feat], dim=1))
+        gated_feat = gate * proprio_proj + (1.0 - gate) * lidar_proj
+        fusion_input = torch.cat([proprio_proj, lidar_proj, gated_feat], dim=1)
+        fused_feat = self.feature_norm(self.fusion_net(fusion_input))
+        # fusion_input = torch.cat([proprio_feat, lidar_feat], dim=1)
+        # fused_feat = self.fusion_net(fusion_input)
         
         return fused_feat
 
@@ -127,7 +150,8 @@ class RMMF_ActorCritic(nn.Module):
         batch_size, seq_len, _ = x.shape
         
         # 1. 展平 Batch 和 Seq 维度以进行并行特征提取
-        x_flat = x.reshape(-1, 24)
+        # x_flat = x.reshape(-1, 24)
+        x_flat = x.reshape(-1, self.observation_dim)
         features_flat = self._extract_features(x_flat)
         
         # 2. 恢复序列维度以输入 GRU
@@ -139,6 +163,9 @@ class RMMF_ActorCritic(nn.Module):
             hidden_state = torch.zeros(1, batch_size, self.hidden_dim).to(x.device)
             
         gru_out, next_hidden = self.gru(features_seq, hidden_state)
+        memory_gate = self.memory_gate(torch.cat([features_seq, gru_out], dim=-1))
+        refined_memory = self.memory_refine(features_seq)
+        gru_out = self.memory_norm(gru_out + memory_gate * refined_memory)
         # gru_out: (Batch, Seq_Len, Hidden)
         
         return gru_out, next_hidden

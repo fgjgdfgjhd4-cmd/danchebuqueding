@@ -17,6 +17,8 @@ class DynamicObstacle:
         self.id = id # 唯一标识符
         self.pos = np.array(pos, dtype=np.float32)
         self.velocity = np.array(velocity, dtype=np.float32) # [vx, vy]
+        self.prev_pos = self.pos.copy()
+        self.smoothed_velocity = self.velocity.copy()
         self.radius = radius
 
     def update(self, dt, map_width, map_height, map_matrix, other_obstacles):
@@ -24,6 +26,7 @@ class DynamicObstacle:
         更新位置，包含物理碰撞处理
         """
         # 1. 计算预期位置
+        self.prev_pos = self.pos.copy()
         next_pos = self.pos + self.velocity * dt
         
         collision_detected = False
@@ -65,8 +68,10 @@ class DynamicObstacle:
         # --- 3. 更新状态 ---
         if not collision_detected:
             self.pos = next_pos
+            measured_velocity = (self.pos - self.prev_pos) / max(dt, 1e-6)
+            self.smoothed_velocity = 0.7 * self.smoothed_velocity + 0.3 * measured_velocity
         else:
-            pass 
+            self.smoothed_velocity = 0.8 * self.smoothed_velocity + 0.2 * self.velocity
 
 class UncertainComplexEnv(gym.Env):
     """
@@ -145,6 +150,17 @@ class UncertainComplexEnv(gym.Env):
         self.default_target_pos = np.array(target_pos, dtype=np.float32) if target_pos is not None else None
 
         self.last_action = None
+        self.prediction_horizon_steps = 3
+        self.prediction_decay = 0.75
+        self.base_safety_margin = 1.5
+        self.safety_penalty_gain = 1.25
+        self.safety_bonus_gain = 0.08
+        self.prediction_cache = []
+        self.last_safety_metrics = {
+            "uncertainty_penalty": 0.0,
+            "risk_min_clearance": float("inf"),
+            "risk_margin": 0.0,
+        }
 
     def set_start_pos(self, pos):
         self.default_start_pos = np.array(pos, dtype=np.float32)
@@ -179,8 +195,16 @@ class UncertainComplexEnv(gym.Env):
         self.trajectory = [self.agent_pos.copy()]
         self.current_step = 0
 
+        # # [新增] 初始化上一步动作记录，用于计算平滑度
+        # self.last_action = np.array([0.0, 0.0], dtype=np.float32)
         # [新增] 初始化上一步动作记录，用于计算平滑度
         self.last_action = np.array([0.0, 0.0], dtype=np.float32)
+        self.prediction_cache = []
+        self.last_safety_metrics = {
+            "uncertainty_penalty": 0.0,
+            "risk_min_clearance": float("inf"),
+            "risk_margin": 0.0,
+        }
 
         # 初始化动态障碍物
         self.dynamic_obstacles = []
@@ -235,6 +259,7 @@ class UncertainComplexEnv(gym.Env):
         terminated = False
         collision_static = self._check_static_collision(new_pos)
         collision_dynamic = self._check_dynamic_collision(new_pos)
+        self.prediction_cache = self._predict_dynamic_obstacles()
         
         # --- 2. 奖励函数 (Ultimate Version) ---
         
@@ -296,6 +321,16 @@ class UncertainComplexEnv(gym.Env):
         # =========================================================
 
         # 状态标记 (新增)
+        # 状态标记 (新增)
+        uncertainty_penalty, risk_min_clearance, risk_margin = self._compute_uncertainty_aware_safety_reward(new_pos)
+        reward -= uncertainty_penalty
+        self.last_safety_metrics = {
+            "uncertainty_penalty": float(uncertainty_penalty),
+            "risk_min_clearance": float(risk_min_clearance),
+            "risk_margin": float(risk_margin),
+        }
+        if risk_min_clearance > risk_margin + 1.0:
+            reward += self.safety_bonus_gain
         is_success = False
         is_collision = False
 
@@ -436,6 +471,65 @@ class UncertainComplexEnv(gym.Env):
             if dist < (agent_radius + obs.radius):
                 return True
         return False
+    
+    def _predict_dynamic_obstacles(self):
+        predictions = []
+        for obs in self.dynamic_obstacles:
+            future_positions = []
+            future_uncertainties = []
+            predicted_pos = obs.pos.copy()
+            velocity = getattr(obs, "smoothed_velocity", obs.velocity)
+            speed = np.linalg.norm(velocity)
+
+            for step_idx in range(1, self.prediction_horizon_steps + 1):
+                predicted_pos = predicted_pos + velocity * self.dt
+                predicted_pos = np.clip(
+                    predicted_pos,
+                    [obs.radius, obs.radius],
+                    [self.width - obs.radius, self.height - obs.radius],
+                )
+                uncertainty = self._estimate_prediction_uncertainty(step_idx, speed)
+                future_positions.append(predicted_pos.copy())
+                future_uncertainties.append(float(uncertainty))
+
+            predictions.append(
+                {
+                    "id": obs.id,
+                    "radius": obs.radius,
+                    "speed": float(speed),
+                    "future_positions": future_positions,
+                    "future_uncertainties": future_uncertainties,
+                }
+            )
+        return predictions
+
+    def _estimate_prediction_uncertainty(self, step_idx, speed):
+        sensor_uncertainty = self.noise_params["pos_std"] + self.noise_params["lidar_std"]
+        motion_uncertainty = 0.25 * speed * self.dt * step_idx
+        return sensor_uncertainty + motion_uncertainty
+
+    def _compute_uncertainty_aware_safety_reward(self, candidate_pos):
+        if not self.prediction_cache:
+            return 0.0, float("inf"), self.base_safety_margin
+
+        agent_radius = self.agent_size / 2.0
+        total_penalty = 0.0
+        min_clearance = float("inf")
+        max_margin = self.base_safety_margin
+
+        for pred in self.prediction_cache:
+            for horizon_idx, future_pos in enumerate(pred["future_positions"]):
+                uncertainty = pred["future_uncertainties"][horizon_idx]
+                risk_margin = self.base_safety_margin + uncertainty
+                center_dist = np.linalg.norm(candidate_pos - future_pos)
+                clearance = center_dist - (agent_radius + pred["radius"])
+                shortfall = risk_margin - clearance
+                if shortfall > 0.0:
+                    total_penalty += (self.prediction_decay ** horizon_idx) * (shortfall ** 2)
+                min_clearance = min(min_clearance, clearance)
+                max_margin = max(max_margin, risk_margin)
+
+        return self.safety_penalty_gain * total_penalty, min_clearance, max_margin
 
     def _sample_free_pos(self):
         while True:
@@ -476,7 +570,19 @@ class UncertainComplexEnv(gym.Env):
     def _get_info(self):
         return {
             "agent_pos_true": self.agent_pos,
-            "dynamic_obstacles": [o.pos for o in self.dynamic_obstacles]
+            # "dynamic_obstacles": [o.pos for o in self.dynamic_obstacles]
+            "dynamic_obstacles": [o.pos for o in self.dynamic_obstacles],
+            "predicted_dynamic_obstacles": [
+                {
+                    "id": pred["id"],
+                    "future_positions": [pos.copy() for pos in pred["future_positions"]],
+                    "future_uncertainties": list(pred["future_uncertainties"]),
+                }
+                for pred in self.prediction_cache
+            ],
+            "uncertainty_penalty": self.last_safety_metrics["uncertainty_penalty"],
+            "risk_min_clearance": self.last_safety_metrics["risk_min_clearance"],
+            "risk_margin": self.last_safety_metrics["risk_margin"],
         }
         
     def set_planned_path(self, path):

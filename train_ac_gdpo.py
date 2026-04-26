@@ -554,7 +554,8 @@ def train():
         # ]
         current_group_trajectories = [
             {'obs': [], 'actions': [], 'rewards': [], 'values': [], 'log_probs': [], 'dones': [], 
-             'start_hidden': None, 'active': True, 'success': False} 
+             'start_hidden': None, 'active': True, 'success': False,
+             'uncertainty_penalties': [], 'risk_min_clearances': [], 'risk_margins': []} 
             for _ in range(CONFIG["GROUP_SIZE"])
         ]
         
@@ -591,6 +592,12 @@ def train():
                     traj['values'].append(value[i].item())
                     traj['rewards'].append(rewards[i])
                     traj['dones'].append(dones[i])
+                    if "uncertainty_penalty" in infos:
+                        traj['uncertainty_penalties'].append(float(infos["uncertainty_penalty"][i]))
+                    if "risk_min_clearance" in infos:
+                        traj['risk_min_clearances'].append(float(infos["risk_min_clearance"][i]))
+                    if "risk_margin" in infos:
+                        traj['risk_margins'].append(float(infos["risk_margin"][i]))
                     
                     if dones[i]:
                         traj['active'] = False
@@ -599,10 +606,19 @@ def train():
                         is_success = False
                         # Gymnasium VectorEnv 会将结束时的 info 放入 "final_info" 中
                         if "final_info" in infos:
-                            final_info = infos["final_info"][i]
+                            # final_info = infos["final_info"][i]
+                            has_final_info = True
+                            if "_final_info" in infos:
+                                has_final_info = bool(infos["_final_info"][i])
+                            if has_final_info:
+                                final_info = infos["final_info"][i]
+                                if final_info is not None:
+                                    is_success = final_info.get("is_success", False)
+                        elif "is_success" in infos:
+                            is_success = bool(infos["is_success"][i])
                             # 确保 info 不为空 (有些版本可能是 None)
-                            if final_info is not None:
-                                is_success = final_info.get('is_success', False)
+                            # if final_info is not None:
+                            #     is_success = final_info.get('is_success', False)
                         
                         # 将成功标记存入轨迹字典，供后续统计使用
                         traj['success'] = is_success
@@ -667,9 +683,18 @@ def train():
         avg_len = np.mean([len(t['rewards']) for t in current_group_trajectories])
         # 简单判断成功率：假设到达终点的奖励必定大于 50 (根据环境设置)
         # success_rate = np.mean([1.0 if r[-1] > 50.0 else 0.0 for r in [t['rewards'] for t in current_group_trajectories]])
-        success_rate = np.mean([1.0 if t.get('success', False) else 0.0 for t in current_group_trajectories])
+        # success_rate = np.mean([1.0 if t.get('success', False) else 0.0 for t in current_group_trajectories])
+        success_rate = np.mean([1.0 if t.get('success', False) else 0.0 for t in current_group_trajectories]) * 100.0
+        uncertainty_values = [v for t in current_group_trajectories for v in t['uncertainty_penalties']]
+        clearance_values = [v for t in current_group_trajectories for v in t['risk_min_clearances']]
+        margin_values = [v for t in current_group_trajectories for v in t['risk_margins']]
+        avg_uncertainty_penalty = np.mean(uncertainty_values) if uncertainty_values else 0.0
+        avg_min_clearance = np.mean(clearance_values) if clearance_values else 0.0
+        avg_risk_margin = np.mean(margin_values) if margin_values else 0.0
+        avg_safety_buffer = avg_min_clearance - avg_risk_margin
         # 基础日志字符串
-        log_str = f"Ep: {episode}/{CONFIG['TOTAL_EPISODES']} | {mode_name} | Rew: {avg_reward:.2f} | Len: {avg_len:.1f} | SR: {success_rate*100:.1f}%"
+        log_str = f"Ep: {episode}/{CONFIG['TOTAL_EPISODES']} | {mode_name} | Rew: {avg_reward:.2f} | Len: {avg_len:.1f} | SR: {success_rate:.1f}% | Safe: Pen={avg_uncertainty_penalty:.3f} Buf={avg_safety_buffer:.3f}"
+        # log_str = f"Ep: {episode}/{CONFIG['TOTAL_EPISODES']} | {mode_name} | Rew: {avg_reward:.2f} | Len: {avg_len:.1f} | SR: {success_rate*100:.1f}%"
         
         if update_happened:
             # [关键新增] 提取并显示训练指标
@@ -694,6 +719,10 @@ def train():
         writer.add_scalar("Train/Average_Reward", avg_reward, episode)
         writer.add_scalar("Train/Success_Rate", success_rate, episode)
         writer.add_scalar("Curriculum/Distance", task_dist, episode)
+        writer.add_scalar("Safety/Uncertainty_Penalty", avg_uncertainty_penalty, episode)
+        writer.add_scalar("Safety/Min_Clearance", avg_min_clearance, episode)
+        writer.add_scalar("Safety/Risk_Margin", avg_risk_margin, episode)
+        writer.add_scalar("Safety/Buffer", avg_safety_buffer, episode)
         
         # --- 保存最佳模型 ---
         if avg_reward > best_reward:
