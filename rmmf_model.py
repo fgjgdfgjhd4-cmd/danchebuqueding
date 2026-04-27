@@ -14,6 +14,118 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
+class LegacyRMMF_ActorCritic(nn.Module):
+    """
+    兼容旧版 checkpoint 的 RMMF 结构。
+    该版本使用直接拼接的 128 -> hidden_dim 融合层，
+    不包含后续新增的投影、门控与 memory refine 模块。
+    """
+    def __init__(self, observation_dim=24, action_dim=2, hidden_dim=128):
+        super(LegacyRMMF_ActorCritic, self).__init__()
+
+        self.observation_dim = observation_dim
+        self.hidden_dim = hidden_dim
+        self.split_idx = 8
+        self.proprio_dim = 8
+        self.lidar_dim = 16
+
+        self.proprio_net = nn.Sequential(
+            layer_init(nn.Linear(self.proprio_dim, 64)),
+            nn.ReLU(),
+            layer_init(nn.Linear(64, 64)),
+            nn.ReLU()
+        )
+
+        self.lidar_cnn = nn.Sequential(
+            layer_init(nn.Conv1d(in_channels=1, out_channels=8, kernel_size=3, padding=1)),
+            nn.ReLU(),
+            layer_init(nn.Conv1d(in_channels=8, out_channels=16, kernel_size=3, padding=1)),
+            nn.ReLU(),
+            nn.Flatten()
+        )
+        self.cnn_out_dim = 16 * 16
+
+        self.lidar_fc = nn.Sequential(
+            layer_init(nn.Linear(self.cnn_out_dim, 64)),
+            nn.ReLU()
+        )
+
+        self.fusion_net = nn.Sequential(
+            layer_init(nn.Linear(64 + 64, hidden_dim)),
+            nn.ReLU()
+        )
+
+        self.gru = nn.GRU(hidden_dim, hidden_dim, batch_first=True)
+
+        self.critic = nn.Sequential(
+            layer_init(nn.Linear(hidden_dim, 64)),
+            nn.Tanh(),
+            layer_init(nn.Linear(64, 1), std=1.0)
+        )
+
+        self.actor_mean = layer_init(nn.Linear(hidden_dim, action_dim), std=0.01)
+        self.actor_logstd = nn.Parameter(torch.zeros(1, action_dim) - 0.5)
+
+        self.register_buffer("action_scale", torch.tensor([1.5, 1.0]))
+        self.register_buffer("action_bias",  torch.tensor([0.5, 0.0]))
+
+    def _extract_features(self, x):
+        proprio_input = x[:, :self.split_idx]
+        lidar_input = x[:, self.split_idx:]
+
+        proprio_feat = self.proprio_net(proprio_input)
+        lidar_input = lidar_input.unsqueeze(1)
+        lidar_feat_raw = self.lidar_cnn(lidar_input)
+        lidar_feat = self.lidar_fc(lidar_feat_raw)
+
+        fusion_input = torch.cat([proprio_feat, lidar_feat], dim=1)
+        return self.fusion_net(fusion_input)
+
+    def forward(self, x, hidden_state=None):
+        batch_size, seq_len, _ = x.shape
+        x_flat = x.reshape(-1, self.observation_dim)
+        features_flat = self._extract_features(x_flat)
+        features_seq = features_flat.reshape(batch_size, seq_len, self.hidden_dim)
+
+        if hidden_state is None:
+            hidden_state = torch.zeros(1, batch_size, self.hidden_dim).to(x.device)
+
+        gru_out, next_hidden = self.gru(features_seq, hidden_state)
+        return gru_out, next_hidden
+
+    def get_action(self, x, hidden_state=None, deterministic=False):
+        x = x.unsqueeze(1)
+        gru_out, next_hidden = self.forward(x, hidden_state)
+        belief_state = gru_out[:, -1, :]
+
+        value = self.critic(belief_state)
+        mean = torch.tanh(self.actor_mean(belief_state))
+        log_std = self.actor_logstd.expand_as(mean)
+        std = torch.exp(log_std)
+        dist = torch.distributions.Normal(mean, std)
+
+        if deterministic:
+            raw_action = mean
+        else:
+            raw_action = dist.rsample()
+
+        raw_action_clipped = torch.clamp(raw_action, -1.0, 1.0)
+        log_prob = dist.log_prob(raw_action).sum(dim=-1)
+        scaled_action = raw_action_clipped * self.action_scale + self.action_bias
+
+        return scaled_action, raw_action, log_prob, next_hidden, value
+
+    def evaluate_actions(self, obs, actions, hidden_states, masks=None):
+        gru_out, _ = self.forward(obs, hidden_states)
+        values = self.critic(gru_out)
+        mean = torch.tanh(self.actor_mean(gru_out))
+        log_std = self.actor_logstd.expand_as(mean)
+        std = torch.exp(log_std)
+        dist = torch.distributions.Normal(mean, std)
+        log_probs = dist.log_prob(actions).sum(dim=-1)
+        entropy = dist.entropy().sum(dim=-1)
+        return values, log_probs, entropy
+
 class RMMF_ActorCritic(nn.Module):
     """
     基于循环神经网络的多模态融合架构 (RMMF)
@@ -241,6 +353,36 @@ class RMMF_ActorCritic(nn.Module):
         entropy = dist.entropy().sum(dim=-1)
         
         return values, log_probs, entropy
+
+
+def detect_rmmf_variant(state_dict):
+    """
+    根据 checkpoint 参数名自动识别网络版本。
+    """
+    if "proprio_proj.weight" in state_dict:
+        return "current"
+    return "legacy"
+
+
+def build_rmmf_model_from_state_dict(state_dict, observation_dim=24, action_dim=2, hidden_dim=128):
+    """
+    根据 checkpoint 自动构造匹配的 RMMF 模型。
+    """
+    variant = detect_rmmf_variant(state_dict)
+    if variant == "legacy":
+        model = LegacyRMMF_ActorCritic(
+            observation_dim=observation_dim,
+            action_dim=action_dim,
+            hidden_dim=hidden_dim,
+        )
+    else:
+        model = RMMF_ActorCritic(
+            observation_dim=observation_dim,
+            action_dim=action_dim,
+            hidden_dim=hidden_dim,
+        )
+    return model, variant
+
 
 # --- 测试代码 ---
 if __name__ == "__main__":

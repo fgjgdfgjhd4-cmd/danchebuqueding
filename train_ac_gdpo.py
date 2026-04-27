@@ -1,334 +1,4 @@
-# import os
-# # 设置环境变量，允许 OpenMP 库重复加载 (解决 Windows 下 Numpy/Torch 冲突报错)
-# os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
-# import torch
-# import numpy as np
-# import gymnasium as gym
-# import time
-# from torch.utils.tensorboard import SummaryWriter
-# from datetime import datetime
-
-# # --- 导入自定义模块 ---
-# # 确保这些文件在同一目录下
-# from uncertain_env import UncertainComplexEnv
-# from rmmf_model import RMMF_ActorCritic
-# from ac_gdpo_agent import AC_GDPO_Agent
-
-# # ==========================================
-# # 1. 配置参数
-# # ==========================================
-# CONFIG = {
-#     # --- 训练规模 ---
-#     "TOTAL_EPISODES": 3000,      # 总训练轮数 (由您评估决定)
-#     "MAX_STEPS": 400,            # 单个 Episode 最大步数 (足够走到终点即可)
-#     "GROUP_SIZE": 16,            # 组大小 (并行环境数量)，GRPO 建议 16-64
-    
-#     # --- 算法参数 ---
-#     "LR": 3e-4,                  # 学习率
-#     "GAMMA": 0.99,               # 折扣因子
-#     "CLIP_LOW": 0.2,             # DAPO 参数
-#     "CLIP_HIGH": 0.28,           # DAPO 参数
-#     "UPDATE_EPOCHS": 4,          # 每次采集后更新网络的次数
-    
-#     # --- 模型参数 ---
-#     "HIDDEN_DIM": 128,           # GRU 隐层维度
-    
-#     # --- 系统 ---
-#     "SEED": 42,
-#     "DEVICE": "cuda" if torch.cuda.is_available() else "cpu",
-#     "VISUALIZE_FREQ": 50,        # 每多少轮渲染一次验证
-#     "SAVE_DIR": "./results"
-# }
-
-# # ==========================================
-# # 2. 辅助函数
-# # ==========================================
-
-# def make_env(rank):
-#     """环境工厂函数，用于创建并行环境"""
-#     def _thunk():
-#         env = UncertainComplexEnv()
-#         # 注意：这里不需要 ActionScalingWrapper，因为 RMMF 模型内部已经做了缩放
-#         return env
-#     return _thunk
-
-# def pad_collate(batch_data, device):
-#     """
-#     将变长的轨迹列表填充为张量 Batch
-#     输入: List[Trajectory Dict]
-#     输出: Padded Tensors, Masks
-#     """
-#     # 获取最大长度
-#     lengths = [len(traj['rewards']) for traj in batch_data]
-#     max_len = max(lengths)
-#     batch_size = len(batch_data)
-    
-#     # 初始化容器
-#     padded_obs = torch.zeros(batch_size, max_len, 24).to(device)
-#     padded_actions = torch.zeros(batch_size, max_len, 2).to(device)
-#     padded_old_log_probs = torch.zeros(batch_size, max_len).to(device)
-#     padded_returns = torch.zeros(batch_size, max_len).to(device)
-#     padded_advantages = torch.zeros(batch_size, max_len).to(device)
-    
-#     # 初始 hidden state (Batch, Seq=1, Hidden) -> 转为 (1, Batch, Hidden)
-#     start_hiddens = torch.cat([traj['start_hidden'] for traj in batch_data], dim=1).to(device)
-    
-#     # 填充数据
-#     for i, traj in enumerate(batch_data):
-#         l = lengths[i]
-#         padded_obs[i, :l, :] = torch.stack(traj['obs'])
-#         padded_actions[i, :l, :] = torch.stack(traj['actions'])
-#         padded_old_log_probs[i, :l] = torch.stack(traj['log_probs'])
-#         padded_returns[i, :l] = traj['returns']
-#         padded_advantages[i, :l] = traj['norm_advantages']
-        
-#     # 打包成 DataLoader 易于使用的格式
-#     # 注意：我们这里手动构造一个单一的 Batch，因为 GRPO 通常是全 Batch 更新
-#     return [{
-#         'obs': padded_obs,
-#         'actions': padded_actions,
-#         'log_probs': padded_old_log_probs,
-#         'returns': padded_returns,
-#         'norm_advantages': padded_advantages,
-#         'hidden_states': start_hiddens
-#     }]
-
-# # ==========================================
-# # 3. 训练主程序
-# # ==========================================
-# def train():
-#     # --- 初始化 ---
-#     run_name = f"AC_GDPO_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-#     log_dir = os.path.join(CONFIG["SAVE_DIR"], run_name)
-#     os.makedirs(log_dir, exist_ok=True)
-    
-#     writer = SummaryWriter(log_dir)
-#     print(f"--- Training Started: {run_name} using {CONFIG['DEVICE']} ---")
-
-#     # 创建环境
-#     # AsyncVectorEnv 用于并行采集数据，极大地加速 GRPO 训练
-#     envs = gym.vector.AsyncVectorEnv([make_env(i) for i in range(CONFIG["GROUP_SIZE"])])
-    
-#     # 创建可视化/验证环境 (单进程)
-#     eval_env = UncertainComplexEnv(render_mode="human")
-
-#     # 创建模型与算法
-#     model = RMMF_ActorCritic(
-#         observation_dim=24, 
-#         action_dim=2, 
-#         hidden_dim=CONFIG["HIDDEN_DIM"]
-#     )
-    
-#     agent = AC_GDPO_Agent(
-#         model=model,
-#         lr=CONFIG["LR"],
-#         gamma=CONFIG["GAMMA"],
-#         clip_low=CONFIG["CLIP_LOW"],
-#         clip_high=CONFIG["CLIP_HIGH"],
-#         device=CONFIG["DEVICE"]
-#     )
-
-#     # 记录最佳模型
-#     best_reward = -float('inf')
-    
-#     # GRU 状态初始化 (Batch=Group_Size)
-#     # 维度: (Num_Layers=1, Batch, Hidden)
-#     hidden_states = torch.zeros(1, CONFIG["GROUP_SIZE"], CONFIG["HIDDEN_DIM"]).to(CONFIG["DEVICE"])
-
-#     # --- 主循环 ---
-#     for episode in range(1, CONFIG["TOTAL_EPISODES"] + 1):
-        
-#         # 1. [GRPO 关键步骤] 生成统一的任务配置 (Task Generation)
-#         # 我们随机生成一个起点和终点，强迫所有 16 个环境跑这同一个任务
-#         # 这样它们的回报差异纯粹来自于策略的随机性和环境的噪声，符合 GRPO 假设
-#         # 这里的逻辑是：利用 envs.reset(options=...) 广播配置
-        
-#         # 为了生成有效的起点终点，我们先用 eval_env 采样一对合法的
-#         _temp_obs, _ = eval_env.reset()
-#         task_config = {
-#             'start_pos': eval_env.agent_pos.copy(),
-#             'target_pos': eval_env.target_pos.copy()
-#         }
-        
-#         # 2. 重置并行环境 (广播任务)
-#         # Gym VectorEnv 的 reset options 会传给所有子环境
-#         obs, _ = envs.reset(options=task_config)
-        
-#         # 重置 RNN 记忆
-#         hidden_states.fill_(0.0)
-        
-#         # 存储本轮 Group 的数据
-#         # 结构: group_trajectories[env_id] = { ... }
-#         group_trajectories = [
-#             {'obs': [], 'actions': [], 'rewards': [], 'values': [], 'log_probs': [], 'dones': [], 
-#              'start_hidden': None, 'active': True} 
-#             for _ in range(CONFIG["GROUP_SIZE"])
-#         ]
-        
-#         # 记录初始 Hidden (用于训练时的梯度反传起点)
-#         for i in range(CONFIG["GROUP_SIZE"]):
-#             group_trajectories[i]['start_hidden'] = hidden_states[:, i:i+1, :].clone()
-
-#         step_count = 0
-#         active_envs_count = CONFIG["GROUP_SIZE"]
-        
-#         # --- 数据采集 (Rollout) ---
-#         while active_envs_count > 0 and step_count < CONFIG["MAX_STEPS"]:
-#             step_count += 1
-            
-#             # 转 Tensor
-#             obs_tensor = torch.from_numpy(obs).float().to(CONFIG["DEVICE"])
-            
-#             # 策略推理
-#             with torch.no_grad():
-#                 # 注意：hidden_states 会在每一步被更新
-#                 scaled_action, raw_action, log_prob, next_hidden, value = agent.get_action(
-#                     obs_tensor, hidden_states
-#                 )
-            
-#             # 执行动作
-#             # scaled_action 转为 numpy 传给 gym
-#             cpu_actions = scaled_action.cpu().numpy()
-#             next_obs, rewards, terminations, truncations, infos = envs.step(cpu_actions)
-            
-#             # 数据存储
-#             dones = np.logical_or(terminations, truncations)
-            
-#             for i in range(CONFIG["GROUP_SIZE"]):
-#                 if group_trajectories[i]['active']:
-#                     # 存数据
-#                     traj = group_trajectories[i]
-#                     traj['obs'].append(obs_tensor[i].clone())
-#                     traj['actions'].append(raw_action[i].clone()) # 存 Raw Action!
-#                     traj['log_probs'].append(log_prob[i].clone())
-#                     traj['values'].append(value[i].item())
-#                     traj['rewards'].append(rewards[i])
-#                     traj['dones'].append(dones[i])
-                    
-#                     if dones[i]:
-#                         traj['active'] = False
-#                         active_envs_count -= 1
-#                         # 记录终止时的 Value (Bootstrap用，如果是超时截断则用 V(s_last)，如果是撞车则为0)
-#                         # 这里简单处理：如果 Terminated (撞/到), next_val=0; 如果 Truncated (超时), next_val=V(next_obs)
-#                         if truncations[i]:
-#                             # 需要额外推理一次 next_obs 的价值
-#                             with torch.no_grad():
-#                                 _, _, _, _, last_val = agent.get_action(
-#                                     torch.from_numpy(next_obs[i]).float().to(CONFIG["DEVICE"]).unsqueeze(0),
-#                                     next_hidden[:, i:i+1, :]
-#                                 )
-#                             traj['next_value'] = last_val.item()
-#                         else:
-#                             traj['next_value'] = 0.0
-                            
-#                         # 标记: 虽然环境自动 reset 了，但我们在本轮 episode 不再记录它的数据
-#                         # 也不需要清空 hidden，因为我们不再使用 active=False 的环境数据
-            
-#             # 更新状态
-#             obs = next_obs
-#             hidden_states = next_hidden
-            
-#         # 标记那些到最大步数还没停的
-#         for i in range(CONFIG["GROUP_SIZE"]):
-#             if group_trajectories[i]['active']:
-#                 traj = group_trajectories[i]
-#                 traj['truncated'] = True # 标记为截断
-#                 # 计算最后一步价值
-#                 with torch.no_grad():
-#                      _, _, _, _, last_val = agent.get_action(
-#                         torch.from_numpy(obs[i]).float().to(CONFIG["DEVICE"]).unsqueeze(0),
-#                         hidden_states[:, i:i+1, :]
-#                     )
-#                 traj['next_value'] = last_val.item()
-#             else:
-#                 traj = group_trajectories[i]
-#                 traj['truncated'] = False # 之前已经通过 termination/truncation 结束了
-
-#         # --- 算法更新 (Update) ---
-        
-#         # 1. 计算优势 (GRPO Group Normalization)
-#         # 将数据包装成 agent 期望的 batch_groups 格式: List[List[Traj]]
-#         # 这里只有 1 个 Group，包含 CONFIG["GROUP_SIZE"] 条轨迹
-#         batch_groups = [group_trajectories]
-        
-#         # 调用 Agent 计算 GAE 和 组内归一化
-#         # flat_trajs 是处理好优势后的轨迹列表
-#         flat_trajs = agent.compute_group_advantages(batch_groups)
-        
-#         # 2. 整理数据用于 PPO Update
-#         # 使用 pad_collate 处理变长序列
-#         dataloader = pad_collate(flat_trajs, CONFIG["DEVICE"])
-        
-#         # 3. 更新网络
-#         train_stats = agent.update(dataloader, num_epochs=CONFIG["UPDATE_EPOCHS"])
-        
-#         # --- 统计与日志 ---
-#         avg_reward = np.mean([sum(t['rewards']) for t in flat_trajs])
-#         avg_len = np.mean([len(t['rewards']) for t in flat_trajs])
-#         success_rate = np.mean([1.0 if r[-1] > 50.0 else 0.0 for r in [t['rewards'] for t in flat_trajs]]) # 假设到达奖励 > 50
-        
-#         # 打印进度
-#         print(f"Ep {episode}/{CONFIG['TOTAL_EPISODES']} | "
-#               f"Rew: {avg_reward:.2f} | Len: {avg_len:.1f} | "
-#               f"Succ: {success_rate*100:.1f}% | "
-#               f"Loss: A={train_stats['loss/actor']:.3f} C={train_stats['loss/critic']:.3f}")
-        
-#         # 写 Tensorboard
-#         writer.add_scalar("Train/Average_Reward", avg_reward, episode)
-#         writer.add_scalar("Train/Success_Rate", success_rate, episode)
-#         writer.add_scalar("Train/Average_Length", avg_len, episode)
-#         writer.add_scalar("Loss/Actor", train_stats['loss/actor'], episode)
-#         writer.add_scalar("Loss/Critic", train_stats['loss/critic'], episode)
-        
-#         # --- 保存最佳模型 ---
-#         if avg_reward > best_reward:
-#             best_reward = avg_reward
-#             save_path = os.path.join(log_dir, "best_model.pth")
-#             agent.save(save_path)
-#             print(f" >> Best model saved with reward {best_reward:.2f}")
-            
-#         # 定期保存 Checkpoint
-#         if episode % 200 == 0:
-#             agent.save(os.path.join(log_dir, f"ckpt_{episode}.pth"))
-
-#         # --- 可视化 (Render) ---
-#         if episode % CONFIG["VISUALIZE_FREQ"] == 0:
-#             print("\n--- Visualizing Performance ---")
-#             vis_obs, _ = eval_env.reset()
-#             vis_hidden = torch.zeros(1, 1, CONFIG["HIDDEN_DIM"]).to(CONFIG["DEVICE"])
-#             vis_done = False
-#             vis_steps = 0
-            
-#             while not vis_done and vis_steps < CONFIG["MAX_STEPS"]:
-#                 eval_env.render()
-                
-#                 vis_obs_tensor = torch.from_numpy(vis_obs).float().to(CONFIG["DEVICE"]).unsqueeze(0)
-#                 with torch.no_grad():
-#                     # 使用 deterministic=True 进行评估
-#                     s_action, _, _, vis_next_hidden, _ = agent.get_action(
-#                         vis_obs_tensor, vis_hidden, deterministic=True
-#                     )
-                
-#                 vis_action = s_action.cpu().numpy()[0]
-#                 vis_obs, _, term, trunc, _ = eval_env.step(vis_action)
-                
-#                 vis_hidden = vis_next_hidden
-#                 vis_done = term or trunc
-#                 vis_steps += 1
-            
-#             print(f"Visualization finished in {vis_steps} steps.\n")
-
-#     # 收尾
-#     envs.close()
-#     eval_env.close()
-#     writer.close()
-#     print("Training Finished.")
-
-# if __name__ == "__main__":
-#     train()
-
-# v2
 import os
 # 设置环境变量，允许 OpenMP 库重复加载 (解决 Windows 下 Numpy/Torch 冲突报错)
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
@@ -345,6 +15,7 @@ from datetime import datetime
 from uncertain_env import UncertainComplexEnv
 from rmmf_model import RMMF_ActorCritic
 from ac_gdpo_agent import AC_GDPO_Agent
+from dsa_mask import DSABeamMasker
 
 # ==========================================
 # 1. 配置参数
@@ -371,6 +42,13 @@ CONFIG = {
     "DEVICE": "cuda" if torch.cuda.is_available() else "cpu",
     "VISUALIZE_FREQ": 10,         # 可视化频率
     "SAVE_DIR": "./results",
+    "USE_DSA_MASK": True,
+    "DSA_FLOOR_GAIN": 0.35,
+    "DSA_TARGET_SIGMA": np.pi / 4.0,
+    "DSA_MOTION_SIGMA": np.pi / 3.5,
+    "DSA_SURPRISE_GAIN": 0.60,
+    "DSA_TURN_SIDE_GAIN": 0.18,
+    "DSA_EMA_DECAY": 0.70,
 
     "STAGE_ONE_EPISODE": 100,
     "STAGE_TWO_EPISODE": 400,
@@ -389,6 +67,17 @@ def make_env(rank):
         # 注意：不需要 ActionScalingWrapper，RMMF 模型内部已集成缩放逻辑
         return env
     return _thunk
+
+def build_dsa_masker():
+    return DSABeamMasker(
+        floor_gain=CONFIG["DSA_FLOOR_GAIN"],
+        target_sigma=CONFIG["DSA_TARGET_SIGMA"],
+        motion_sigma=CONFIG["DSA_MOTION_SIGMA"],
+        surprise_gain=CONFIG["DSA_SURPRISE_GAIN"],
+        turn_side_gain=CONFIG["DSA_TURN_SIDE_GAIN"],
+        ema_decay=CONFIG["DSA_EMA_DECAY"],
+    )
+
 
 def pad_collate(batch_data, device):
     """
@@ -464,6 +153,7 @@ def train():
         clip_high=CONFIG["CLIP_HIGH"],
         device=CONFIG["DEVICE"]
     )
+    dsa_masker = build_dsa_masker() if CONFIG["USE_DSA_MASK"] else None
 
     # 记录最佳模型
     best_reward = -float('inf')
@@ -545,13 +235,10 @@ def train():
         # =================================================
         obs, _ = envs.reset(options=task_config)
         hidden_states.fill_(0.0)
+        if dsa_masker is not None:
+            dsa_masker.reset(CONFIG["GROUP_SIZE"], torch.device(CONFIG["DEVICE"]))
         
         # 存储本轮 Group 的数据容器
-        # current_group_trajectories = [
-        #     {'obs': [], 'actions': [], 'rewards': [], 'values': [], 'log_probs': [], 'dones': [], 
-        #      'start_hidden': None, 'active': True} 
-        #     for _ in range(CONFIG["GROUP_SIZE"])
-        # ]
         current_group_trajectories = [
             {'obs': [], 'actions': [], 'rewards': [], 'values': [], 'log_probs': [], 'dones': [], 
              'start_hidden': None, 'active': True, 'success': False,
@@ -572,11 +259,15 @@ def train():
             step_count += 1
             
             obs_tensor = torch.from_numpy(obs).float().to(CONFIG["DEVICE"])
+            if dsa_masker is not None:
+                obs_tensor = dsa_masker.apply(obs_tensor)
             
             with torch.no_grad():
                 scaled_action, raw_action, log_prob, next_hidden, value = agent.get_action(
                     obs_tensor, hidden_states
                 )
+            if dsa_masker is not None:
+                dsa_masker.update_action_history(scaled_action)
             
             cpu_actions = scaled_action.cpu().numpy()
             next_obs, rewards, terminations, truncations, infos = envs.step(cpu_actions)
@@ -606,27 +297,27 @@ def train():
                         is_success = False
                         # Gymnasium VectorEnv 会将结束时的 info 放入 "final_info" 中
                         if "final_info" in infos:
-                            # final_info = infos["final_info"][i]
                             has_final_info = True
                             if "_final_info" in infos:
                                 has_final_info = bool(infos["_final_info"][i])
                             if has_final_info:
                                 final_info = infos["final_info"][i]
+                            # 确保 info 不为空 (有些版本可能是 None)
                                 if final_info is not None:
                                     is_success = final_info.get("is_success", False)
                         elif "is_success" in infos:
                             is_success = bool(infos["is_success"][i])
-                            # 确保 info 不为空 (有些版本可能是 None)
-                            # if final_info is not None:
-                            #     is_success = final_info.get('is_success', False)
                         
                         # 将成功标记存入轨迹字典，供后续统计使用
                         traj['success'] = is_success
 
                         if truncations[i]:
                             with torch.no_grad():
+                                next_obs_tensor = torch.from_numpy(next_obs[i]).float().to(CONFIG["DEVICE"]).unsqueeze(0)
+                                if dsa_masker is not None:
+                                    next_obs_tensor = dsa_masker.fork(i).apply(next_obs_tensor)
                                 _, _, _, _, last_val = agent.get_action(
-                                    torch.from_numpy(next_obs[i]).float().to(CONFIG["DEVICE"]).unsqueeze(0),
+                                    next_obs_tensor,
                                     next_hidden[:, i:i+1, :]
                                 )
                             traj['next_value'] = last_val.item()
@@ -646,8 +337,11 @@ def train():
                 # 仍在运行 (达到 Max Steps)，需要截断
                 traj['truncated'] = False 
                 with torch.no_grad():
+                     final_obs_tensor = torch.from_numpy(obs[i]).float().to(CONFIG["DEVICE"]).unsqueeze(0)
+                     if dsa_masker is not None:
+                         final_obs_tensor = dsa_masker.fork(i).apply(final_obs_tensor)
                      _, _, _, _, last_val = agent.get_action(
-                        torch.from_numpy(obs[i]).float().to(CONFIG["DEVICE"]).unsqueeze(0),
+                        final_obs_tensor,
                         hidden_states[:, i:i+1, :]
                     )
                 traj['next_value'] = last_val.item()
@@ -683,7 +377,6 @@ def train():
         avg_len = np.mean([len(t['rewards']) for t in current_group_trajectories])
         # 简单判断成功率：假设到达终点的奖励必定大于 50 (根据环境设置)
         # success_rate = np.mean([1.0 if r[-1] > 50.0 else 0.0 for r in [t['rewards'] for t in current_group_trajectories]])
-        # success_rate = np.mean([1.0 if t.get('success', False) else 0.0 for t in current_group_trajectories])
         success_rate = np.mean([1.0 if t.get('success', False) else 0.0 for t in current_group_trajectories]) * 100.0
         uncertainty_values = [v for t in current_group_trajectories for v in t['uncertainty_penalties']]
         clearance_values = [v for t in current_group_trajectories for v in t['risk_min_clearances']]
@@ -692,9 +385,9 @@ def train():
         avg_min_clearance = np.mean(clearance_values) if clearance_values else 0.0
         avg_risk_margin = np.mean(margin_values) if margin_values else 0.0
         avg_safety_buffer = avg_min_clearance - avg_risk_margin
+
         # 基础日志字符串
         log_str = f"Ep: {episode}/{CONFIG['TOTAL_EPISODES']} | {mode_name} | Rew: {avg_reward:.2f} | Len: {avg_len:.1f} | SR: {success_rate:.1f}% | Safe: Pen={avg_uncertainty_penalty:.3f} Buf={avg_safety_buffer:.3f}"
-        # log_str = f"Ep: {episode}/{CONFIG['TOTAL_EPISODES']} | {mode_name} | Rew: {avg_reward:.2f} | Len: {avg_len:.1f} | SR: {success_rate*100:.1f}%"
         
         if update_happened:
             # [关键新增] 提取并显示训练指标
@@ -703,8 +396,9 @@ def train():
             loss_c = train_stats.get('loss/critic', 0.0)
             loss_e = train_stats.get('loss/entropy', 0.0)
             loss_kl = train_stats.get('loss/kl', 0.0)
-            # log_str += f" | Loss: A={loss_a:.3f} C={loss_c:.3f} Ent={loss_e:.3f}"
+            
             log_str += f" | Loss: A={loss_a:.3f} C={loss_c:.3f} Ent={loss_e:.3f} KL={loss_kl:.4f}"
+            
             # 记录到 TensorBoard
             writer.add_scalar("Loss/Actor", loss_a, episode)
             writer.add_scalar("Loss/Critic", loss_c, episode)
@@ -728,7 +422,7 @@ def train():
         if avg_reward > best_reward:
             best_reward = avg_reward
             agent.save(os.path.join(log_dir, "best_model.pth"))
-            
+
         if episode > CONFIG["STAGE_THREE_EPISODE"] and avg_reward > best_stage3_reward:
             best_stage3_reward = avg_reward
             agent.save(os.path.join(log_dir, "best_stage4_model.pth"))
@@ -741,6 +435,9 @@ def train():
             print(f"\n[Visual] Rendering {mode_name} (Dist: {task_dist:.1f}m)...")
             
             vis_obs, _ = eval_env.reset(options=task_config)
+            vis_masker = build_dsa_masker() if CONFIG["USE_DSA_MASK"] else None
+            if vis_masker is not None:
+                vis_masker.reset(1, torch.device(CONFIG["DEVICE"]))
             
             vis_hidden = torch.zeros(1, 1, CONFIG["HIDDEN_DIM"]).to(CONFIG["DEVICE"])
             vis_done = False
@@ -750,10 +447,14 @@ def train():
                 eval_env.render()
                 
                 vis_obs_tensor = torch.from_numpy(vis_obs).float().to(CONFIG["DEVICE"]).unsqueeze(0)
+                if vis_masker is not None:
+                    vis_obs_tensor = vis_masker.apply(vis_obs_tensor)
                 with torch.no_grad():
                     s_action, _, _, vis_next_hidden, _ = agent.get_action(
                         vis_obs_tensor, vis_hidden, deterministic=True
                     )
+                if vis_masker is not None:
+                    vis_masker.update_action_history(s_action)
                 
                 vis_action = s_action.cpu().numpy()[0]
                 vis_obs, _, term, trunc, _ = eval_env.step(vis_action)

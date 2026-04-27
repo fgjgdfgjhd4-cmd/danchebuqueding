@@ -10,14 +10,14 @@ import math
 # --- 导入自定义模块 ---
 # 确保 uncertain_env.py, rmmf_model.py, ac_gdpo_agent.py 在同一目录下
 from uncertain_env import UncertainComplexEnv
-from rmmf_model import RMMF_ActorCritic
+from rmmf_model import build_rmmf_model_from_state_dict
 from ac_gdpo_agent import AC_GDPO_Agent
 
 # ==========================================
 # 配置参数
 # ==========================================
 CONFIG = {
-    "MODEL_PATH": "models/DAPO_Curriculum_20260426_131633/best_model.pth", # 请根据实际路径修改
+    "MODEL_PATH": "results/AC_GDPO_Curriculum_20260425_112354/best_stage4_model.pth", # 请根据实际路径修改
     "HIDDEN_DIM": 128,           # 必须与训练时一致
     "MAX_STEPS": 1000,           # 测试时可以给多一点步数，防止因为走得慢被截断
     "DEVICE": "cuda" if torch.cuda.is_available() else "cpu",
@@ -95,14 +95,20 @@ def test():
     # 1. 初始化环境 (开启渲染)
     env = UncertainComplexEnv(render_mode="human")
     
-    # 2. 初始化模型与智能体
-    model = RMMF_ActorCritic(observation_dim=24, action_dim=2, hidden_dim=CONFIG["HIDDEN_DIM"])
-    agent = AC_GDPO_Agent(model, device=CONFIG["DEVICE"])
     
     # 3. 加载权重
     if os.path.exists(CONFIG["MODEL_PATH"]):
-        agent.load(CONFIG["MODEL_PATH"])
-        print("Model loaded successfully.")
+        state_dict = torch.load(CONFIG["MODEL_PATH"], map_location=CONFIG["DEVICE"])
+        model, model_variant = build_rmmf_model_from_state_dict(
+            state_dict,
+            observation_dim=24,
+            action_dim=2,
+            hidden_dim=CONFIG["HIDDEN_DIM"]
+        )
+        model = model.to(CONFIG["DEVICE"])
+        model.load_state_dict(state_dict)
+        agent = AC_GDPO_Agent(model, device=CONFIG["DEVICE"])
+        print(f"Model loaded successfully. Detected architecture: {model_variant}")
     else:
         print(f"Error: Model file not found at {CONFIG['MODEL_PATH']}")
         return
