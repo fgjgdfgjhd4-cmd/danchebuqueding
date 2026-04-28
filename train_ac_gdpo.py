@@ -43,7 +43,7 @@ CONFIG = {
     "VISUALIZE_FREQ": 10,         # 可视化频率
     "SAVE_DIR": "./results",
     "USE_DSA_MASK": True,
-    "DSA_FLOOR_GAIN": 0.35,
+    "DSA_FLOOR_GAIN": 0.25,
     "DSA_TARGET_SIGMA": np.pi / 4.0,
     "DSA_MOTION_SIGMA": np.pi / 3.5,
     "DSA_SURPRISE_GAIN": 0.60,
