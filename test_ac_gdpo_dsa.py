@@ -2,133 +2,131 @@ import os
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
-import time
-
-import gymnasium as gym
 import numpy as np
 import torch
 
-from uncertain_env import UncertainComplexEnv
-from rmmf_model import RMMF_ActorCritic
 from ac_gdpo_agent import AC_GDPO_Agent
-from dsa_mask import DSABeamMasker
-from test import calculate_smoothness
+from dsa_config import (
+    build_dsa_masker_from_config,
+    load_dsa_config_for_model,
+    make_dsa_config,
+)
+from experiment_eval import ExperimentConfig, run_experiment
+from rmmf_model import build_rmmf_model_from_state_dict
 
 
 CONFIG = {
-    "MODEL_PATH": "results/AC_GDPO_Curriculum_20260427_104230/best_stage4_model.pth",
+    "MODEL_PATH": "results/AC_GDPO_Curriculum_20260427_230049/best_stage4_model.pth",
     "HIDDEN_DIM": 128,
     "MAX_STEPS": 1000,
     "DEVICE": "cuda" if torch.cuda.is_available() else "cpu",
+    "RENDER": False,
     "RENDER_DELAY": 0.02,
-    "FIXED_START": [10.0, 10.0],
-    "FIXED_TARGET": [90.0, 96.0],
-    "DSA_FLOOR_GAIN": 0.35,
-    "DSA_TARGET_SIGMA": np.pi / 4.0,
-    "DSA_MOTION_SIGMA": np.pi / 3.5,
-    "DSA_SURPRISE_GAIN": 0.60,
-    "DSA_TURN_SIDE_GAIN": 0.18,
-    "DSA_EMA_DECAY": 0.70,
+    "FIXED_REPEATS": 20,
+    "OUTPUT_DIR": "eval_reports",
+    "DSA_CONFIG": make_dsa_config(
+        floor_gain=0.25,
+    target_sigma=np.pi / 4.0,
+    motion_sigma=np.pi / 3.5,
+    surprise_gain=0.60,
+    turn_side_gain=0.18,
+    ema_decay=0.70,
+    ),
 }
 
 
+def build_agent():
+    if not os.path.exists(CONFIG["MODEL_PATH"]):
+        raise FileNotFoundError(f"Model file not found: {CONFIG['MODEL_PATH']}")
+
+    state_dict = torch.load(CONFIG["MODEL_PATH"], map_location=CONFIG["DEVICE"])
+    model, model_variant = build_rmmf_model_from_state_dict(
+        state_dict,
+        observation_dim=24,
+        action_dim=2,
+        hidden_dim=CONFIG["HIDDEN_DIM"],
+    )
+    model = model.to(CONFIG["DEVICE"])
+    model.load_state_dict(state_dict)
+    agent = AC_GDPO_Agent(model, device=CONFIG["DEVICE"])
+    return agent, model_variant
+
+
 def build_dsa_masker():
-    return DSABeamMasker(
-        floor_gain=CONFIG["DSA_FLOOR_GAIN"],
-        target_sigma=CONFIG["DSA_TARGET_SIGMA"],
-        motion_sigma=CONFIG["DSA_MOTION_SIGMA"],
-        surprise_gain=CONFIG["DSA_SURPRISE_GAIN"],
-        turn_side_gain=CONFIG["DSA_TURN_SIDE_GAIN"],
-        ema_decay=CONFIG["DSA_EMA_DECAY"],
+    return build_dsa_masker_from_config(CONFIG["DSA_CONFIG"])
+
+
+def main():
+    print(f"--- Loading AC-GDPO DSA model from: {CONFIG['MODEL_PATH']} ---")
+    agent, model_variant = build_agent()
+    print(f"Model loaded successfully. Detected architecture: {model_variant}")
+    resolved_dsa_config, loaded_config_path = load_dsa_config_for_model(
+        CONFIG["MODEL_PATH"],
+        fallback_config=CONFIG["DSA_CONFIG"],
+    )
+    CONFIG["DSA_CONFIG"] = resolved_dsa_config
+    if loaded_config_path is not None:
+        print(f"Loaded DSA config from: {loaded_config_path}")
+    else:
+        print("DSA config file not found beside model, using local fallback config.")
+
+    experiment_config = ExperimentConfig(
+        model_path=CONFIG["MODEL_PATH"],
+        hidden_dim=CONFIG["HIDDEN_DIM"],
+        device=CONFIG["DEVICE"],
+        max_steps=CONFIG["MAX_STEPS"],
+        render=CONFIG["RENDER"],
+        render_delay=CONFIG["RENDER_DELAY"],
+        fixed_repeats=CONFIG["FIXED_REPEATS"],
+        output_dir=CONFIG["OUTPUT_DIR"],
     )
 
+    active_masker = {"obj": None}
 
-def test_ac_gdpo_dsa():
-    print(f"--- Loading AC-GDPO DSA Model from: {CONFIG['MODEL_PATH']} ---")
-
-    env = UncertainComplexEnv(render_mode="human")
-    model = RMMF_ActorCritic(observation_dim=24, action_dim=2, hidden_dim=CONFIG["HIDDEN_DIM"])
-    agent = AC_GDPO_Agent(model, device=CONFIG["DEVICE"])
-
-    if os.path.exists(CONFIG["MODEL_PATH"]):
-        agent.load(CONFIG["MODEL_PATH"])
-        print("Model loaded successfully.")
-    else:
-        print(f"Error: Model file not found at {CONFIG['MODEL_PATH']}")
-        return
-
-    start_pos = CONFIG["FIXED_START"]
-    target_pos = CONFIG["FIXED_TARGET"]
-    print(f"Task: Fixed Configuration")
-    print(f"Start: {start_pos} -> Target: {target_pos}")
-
-    obs, _ = env.reset(options={"start_pos": start_pos, "target_pos": target_pos})
-
-    hidden_state = torch.zeros(1, 1, CONFIG["HIDDEN_DIM"]).to(CONFIG["DEVICE"])
-    masker = build_dsa_masker()
-    masker.reset(1, torch.device(CONFIG["DEVICE"]))
-
-    trajectory = [env.agent_pos.copy()]
-    action_history = []
-    total_reward = 0.0
-    steps = 0
-    done = False
-
-    print("\nSimulating with DSA mask...")
-
-    while not done and steps < CONFIG["MAX_STEPS"]:
-        env.render()
-        time.sleep(CONFIG["RENDER_DELAY"])
+    def policy_runner(obs: np.ndarray, hidden_state: torch.Tensor):
+        masker = active_masker["obj"]
+        if masker is None:
+            raise RuntimeError("DSA masker has not been initialized for this episode.")
 
         obs_tensor = torch.from_numpy(obs).float().to(CONFIG["DEVICE"]).unsqueeze(0)
         obs_tensor = masker.apply(obs_tensor)
-
         with torch.no_grad():
-            s_action, _, _, next_hidden, _ = agent.get_action(
+            scaled_action, _, _, next_hidden, _ = agent.get_action(
                 obs_tensor, hidden_state, deterministic=True
             )
-        masker.update_action_history(s_action)
+        masker.update_action_history(scaled_action)
+        action = scaled_action.squeeze(0).detach().cpu().numpy().astype(np.float32)
+        return action, next_hidden
 
-        action = s_action.cpu().numpy()[0]
-        next_obs, reward, terminated, truncated, _ = env.step(action)
+    def episode_setup_factory():
+        def setup():
+            masker = build_dsa_masker()
+            masker.reset(1, torch.device(CONFIG["DEVICE"]))
+            active_masker["obj"] = masker
 
-        trajectory.append(env.agent_pos.copy())
-        action_history.append(action)
-        total_reward += reward
-        steps += 1
+        return setup
 
-        obs = next_obs
-        hidden_state = next_hidden
-        done = terminated or truncated
+    _, summary, run_dir = run_experiment(
+        experiment_name="ac_gdpo_dsa",
+        config=experiment_config,
+        policy_runner=policy_runner,
+        episode_setup_factory=episode_setup_factory,
+    )
 
-    dist_to_goal = np.linalg.norm(env.agent_pos - np.array(target_pos))
-    is_success = dist_to_goal < 2.0
-    result_str = "SUCCESS [Target Reached]" if is_success else "FAILURE [Time out or Collision]"
-    if steps >= CONFIG["MAX_STEPS"]:
-        result_str = "FAILURE [Time Limit Exceeded]"
+    print()
+    for suite_name, metrics in summary.items():
+        print(
+            f"[{suite_name}] episodes={int(metrics['episodes'])} "
+            f"success={metrics['success_rate']:.1f}% "
+            f"collision={metrics['collision_rate']:.1f}% "
+            f"timeout={metrics['timeout_rate']:.1f}% "
+            f"avg_reward={metrics['avg_reward']:.2f}"
+        )
 
-    dt = getattr(env, "dt", 0.1)
-    time_cost = steps * dt
-    traj_arr = np.array(trajectory)
-    path_len = np.sum(np.linalg.norm(traj_arr[1:] - traj_arr[:-1], axis=1))
-    path_smooth, ctrl_smooth = calculate_smoothness(trajectory, action_history)
-    straight_dist = np.linalg.norm(np.array(start_pos) - np.array(target_pos))
-    efficiency = path_len / straight_dist if straight_dist > 0 else 0.0
-
-    print("\n" + "=" * 40)
-    print("      AC-GDPO DSA PERFORMANCE REPORT      ")
-    print("=" * 40)
-    print(f"Result          : {result_str}")
-    print(f"Time Taken      : {time_cost:.1f} s ({steps} steps)")
-    print(f"Total Reward    : {total_reward:.2f}")
-    print(f"Path Length     : {path_len:.2f} m")
-    print(f"Path Smoothness : {path_smooth:.4f} (rad/step, lower is better)")
-    print(f"Ctrl Smoothness : {ctrl_smooth:.4f} (action diff, lower is stable)")
-    print(f"Path Efficiency : {efficiency:.2f}x (Actual / Straight)")
-    print("=" * 40)
-
-    env.close()
+    print(f"\nDetailed results saved to: {os.path.join(run_dir, 'episodes.csv')}")
+    print(f"Summary saved to: {os.path.join(run_dir, 'summary.csv')}")
+    print(f"Readable report saved to: {os.path.join(run_dir, 'summary.txt')}")
 
 
 if __name__ == "__main__":
-    test_ac_gdpo_dsa()
+    main()

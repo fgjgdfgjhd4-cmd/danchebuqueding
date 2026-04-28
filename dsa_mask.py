@@ -5,6 +5,14 @@ import numpy as np
 import torch
 
 
+DEFAULT_FLOOR_GAIN = 0.35
+DEFAULT_TARGET_SIGMA = math.pi / 4.0
+DEFAULT_MOTION_SIGMA = math.pi / 3.5
+DEFAULT_SURPRISE_GAIN = 0.60
+DEFAULT_TURN_SIDE_GAIN = 0.18
+DEFAULT_EMA_DECAY = 0.70
+
+
 class DSABeamMasker:
     """
     Direction-sensitive soft lidar weighting for AC-GDPO only.
@@ -19,12 +27,12 @@ class DSABeamMasker:
         lidar_start_idx: int = 8,
         lidar_dim: int = 16,
         lidar_range: float = 30.0,
-        floor_gain: float = 0.35,
-        target_sigma: float = math.pi / 4.0,
-        motion_sigma: float = math.pi / 3.5,
-        surprise_gain: float = 0.60,
-        turn_side_gain: float = 0.18,
-        ema_decay: float = 0.70,
+        floor_gain: float = DEFAULT_FLOOR_GAIN,
+        target_sigma: float = DEFAULT_TARGET_SIGMA,
+        motion_sigma: float = DEFAULT_MOTION_SIGMA,
+        surprise_gain: float = DEFAULT_SURPRISE_GAIN,
+        turn_side_gain: float = DEFAULT_TURN_SIDE_GAIN,
+        ema_decay: float = DEFAULT_EMA_DECAY,
     ) -> None:
         self.lidar_start_idx = lidar_start_idx
         self.lidar_dim = lidar_dim

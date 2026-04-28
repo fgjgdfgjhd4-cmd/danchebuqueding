@@ -15,7 +15,7 @@ from datetime import datetime
 from uncertain_env import UncertainComplexEnv
 from rmmf_model import RMMF_ActorCritic
 from ac_gdpo_agent import AC_GDPO_Agent
-from dsa_mask import DSABeamMasker
+from dsa_config import build_dsa_masker_from_config, make_dsa_config, save_dsa_config
 
 # ==========================================
 # 1. 配置参数
@@ -43,12 +43,7 @@ CONFIG = {
     "VISUALIZE_FREQ": 10,         # 可视化频率
     "SAVE_DIR": "./results",
     "USE_DSA_MASK": True,
-    "DSA_FLOOR_GAIN": 0.25,
-    "DSA_TARGET_SIGMA": np.pi / 4.0,
-    "DSA_MOTION_SIGMA": np.pi / 3.5,
-    "DSA_SURPRISE_GAIN": 0.60,
-    "DSA_TURN_SIDE_GAIN": 0.18,
-    "DSA_EMA_DECAY": 0.70,
+    "DSA_CONFIG": make_dsa_config(floor_gain=0.25),
 
     "STAGE_ONE_EPISODE": 100,
     "STAGE_TWO_EPISODE": 400,
@@ -69,14 +64,7 @@ def make_env(rank):
     return _thunk
 
 def build_dsa_masker():
-    return DSABeamMasker(
-        floor_gain=CONFIG["DSA_FLOOR_GAIN"],
-        target_sigma=CONFIG["DSA_TARGET_SIGMA"],
-        motion_sigma=CONFIG["DSA_MOTION_SIGMA"],
-        surprise_gain=CONFIG["DSA_SURPRISE_GAIN"],
-        turn_side_gain=CONFIG["DSA_TURN_SIDE_GAIN"],
-        ema_decay=CONFIG["DSA_EMA_DECAY"],
-    )
+    return build_dsa_masker_from_config(CONFIG["DSA_CONFIG"])
 
 
 def pad_collate(batch_data, device):
@@ -127,6 +115,9 @@ def train():
     run_name = f"AC_GDPO_Curriculum_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     log_dir = os.path.join(CONFIG["SAVE_DIR"], run_name)
     os.makedirs(log_dir, exist_ok=True)
+    if CONFIG["USE_DSA_MASK"]:
+        dsa_config_path = save_dsa_config(CONFIG["DSA_CONFIG"], log_dir)
+        print(f"--- DSA config saved to: {dsa_config_path} ---")
     
     writer = SummaryWriter(log_dir)
     print(f"--- Training Started: {run_name} using {CONFIG['DEVICE']} ---")
