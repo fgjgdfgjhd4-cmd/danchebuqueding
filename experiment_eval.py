@@ -22,7 +22,7 @@ class ExperimentConfig:
     max_steps: int = 1000
     render: bool = False
     render_delay: float = 0.02
-    fixed_repeats: int = 20
+    fixed_repeats: int = 100
     output_dir: str = "eval_reports"
 
 

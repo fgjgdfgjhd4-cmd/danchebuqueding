@@ -1,0 +1,33 @@
+========================================================================
+                     ac_gdpo_dsa EVALUATION REPORT    - floor_gain=0.25                    
+========================================================================
+[fixed_suite] episodes=400 | success=75.2% | collision=24.8% | timeout=0.0%
+reward=266.34 +- 172.86 | steps=157.4 | final_dist=12.21
+path_len=146.92 | eff=1.30x | path_smooth=4.2359 | ctrl_smooth=0.8766
+unc_penalty=0.4236 | risk_margin=2.5467 | worst_clearance=-1.7211
+------------------------------------------------------------------------
+[left_bottom_to_right_top] episodes=100 | success=86.0% | collision=14.0% | timeout=0.0%
+reward=313.45 +- 157.01 | steps=142.3 | final_dist=8.93
+path_len=132.62 | eff=1.17x | path_smooth=2.0605 | ctrl_smooth=0.8702
+unc_penalty=0.4001 | risk_margin=2.5461 | worst_clearance=-1.6431
+------------------------------------------------------------------------
+[left_top_to_right_bottom] episodes=100 | success=55.0% | collision=45.0% | timeout=0.0%
+reward=188.81 +- 185.52 | steps=203.6 | final_dist=18.19
+path_len=187.63 | eff=1.66x | path_smooth=1.9631 | ctrl_smooth=0.6995
+unc_penalty=0.4341 | risk_margin=2.5456 | worst_clearance=-1.7211
+------------------------------------------------------------------------
+[right_bottom_to_left_top] episodes=100 | success=79.0% | collision=21.0% | timeout=0.0%
+reward=278.29 +- 163.37 | steps=150.5 | final_dist=11.65
+path_len=140.67 | eff=1.24x | path_smooth=6.3923 | ctrl_smooth=0.8683
+unc_penalty=0.4618 | risk_margin=2.5474 | worst_clearance=-1.3439
+------------------------------------------------------------------------
+[right_top_to_left_bottom] episodes=100 | success=81.0% | collision=19.0% | timeout=0.0%
+reward=284.82 +- 158.29 | steps=133.2 | final_dist=10.08
+path_len=126.76 | eff=1.12x | path_smooth=6.5278 | ctrl_smooth=1.0685
+unc_penalty=0.3983 | risk_margin=2.5476 | worst_clearance=-1.5714
+------------------------------------------------------------------------
+[overall] episodes=400 | success=75.2% | collision=24.8% | timeout=0.0%
+reward=266.34 +- 172.86 | steps=157.4 | final_dist=12.21
+path_len=146.92 | eff=1.30x | path_smooth=4.2359 | ctrl_smooth=0.8766
+unc_penalty=0.4236 | risk_margin=2.5467 | worst_clearance=-1.7211
+------------------------------------------------------------------------

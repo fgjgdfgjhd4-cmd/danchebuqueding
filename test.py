@@ -11,13 +11,13 @@ from rmmf_model import build_rmmf_model_from_state_dict
 
 
 CONFIG = {
-    "MODEL_PATH": "results/AC_GDPO_Curriculum_20260425_112354/best_stage4_model.pth",
+    "MODEL_PATH": "models/DAPO_Curriculum_20260426_131633/best_stage4_model.pth",
     "HIDDEN_DIM": 128,
     "MAX_STEPS": 1000,
     "DEVICE": "cuda" if torch.cuda.is_available() else "cpu",
     "RENDER": False,
     "RENDER_DELAY": 0.02,
-    "FIXED_REPEATS": 20,
+    "FIXED_REPEATS": 100,
     "OUTPUT_DIR": "eval_reports",
 }
 
@@ -37,6 +37,11 @@ def build_agent():
     model.load_state_dict(state_dict)
     agent = AC_GDPO_Agent(model, device=CONFIG["DEVICE"])
     return agent, model_variant
+
+def infer_experiment_name():
+    model_dir_name = os.path.basename(os.path.dirname(os.path.abspath(CONFIG["MODEL_PATH"])))
+    safe_name = model_dir_name.lower().replace(" ", "_")
+    return f"eval_{safe_name}" if safe_name else "eval_model"
 
 
 def main():
@@ -64,8 +69,9 @@ def main():
         action = scaled_action.squeeze(0).detach().cpu().numpy().astype(np.float32)
         return action, next_hidden
 
+    experiment_name = infer_experiment_name()
     _, summary, run_dir = run_experiment(
-        experiment_name="ac_gdpo",
+        experiment_name=experiment_name,
         config=experiment_config,
         policy_runner=policy_runner,
     )

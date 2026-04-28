@@ -22,7 +22,7 @@ CONFIG = {
     "DEVICE": "cuda" if torch.cuda.is_available() else "cpu",
     "RENDER": False,
     "RENDER_DELAY": 0.02,
-    "FIXED_REPEATS": 20,
+    "FIXED_REPEATS": 100,
     "OUTPUT_DIR": "eval_reports",
     "DSA_CONFIG": make_dsa_config(
         floor_gain=0.25,
@@ -55,6 +55,10 @@ def build_agent():
 def build_dsa_masker():
     return build_dsa_masker_from_config(CONFIG["DSA_CONFIG"])
 
+def infer_experiment_name():
+    model_dir_name = os.path.basename(os.path.dirname(os.path.abspath(CONFIG["MODEL_PATH"])))
+    safe_name = model_dir_name.lower().replace(" ", "_")
+    return f"eval_{safe_name}_dsa" if safe_name else "eval_model_dsa"
 
 def main():
     print(f"--- Loading AC-GDPO DSA model from: {CONFIG['MODEL_PATH']} ---")
@@ -106,8 +110,9 @@ def main():
 
         return setup
 
+    experiment_name = infer_experiment_name()
     _, summary, run_dir = run_experiment(
-        experiment_name="ac_gdpo_dsa",
+        experiment_name=experiment_name,
         config=experiment_config,
         policy_runner=policy_runner,
         episode_setup_factory=episode_setup_factory,

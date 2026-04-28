@@ -1,0 +1,33 @@
+========================================================================
+                       ac_gdpo EVALUATION REPORT          gdpo              
+========================================================================
+[fixed_suite] episodes=400 | success=0.0% | collision=100.0% | timeout=0.0%
+reward=-39.79 +- 17.93 | steps=20.7 | final_dist=109.30
+path_len=10.81 | eff=0.10x | path_smooth=0.0657 | ctrl_smooth=0.0044
+unc_penalty=0.0067 | risk_margin=2.5503 | worst_clearance=-0.2961
+------------------------------------------------------------------------
+[left_bottom_to_right_top] episodes=100 | success=0.0% | collision=100.0% | timeout=0.0%
+reward=-29.98 +- 0.55 | steps=17.8 | final_dist=104.86
+path_len=9.49 | eff=0.08x | path_smooth=0.0699 | ctrl_smooth=0.0051
+unc_penalty=0.0002 | risk_margin=2.5504 | worst_clearance=1.9126
+------------------------------------------------------------------------
+[left_top_to_right_bottom] episodes=100 | success=0.0% | collision=100.0% | timeout=0.0%
+reward=-16.35 +- 7.69 | steps=30.0 | final_dist=98.67
+path_len=15.92 | eff=0.14x | path_smooth=0.0574 | ctrl_smooth=0.0029
+unc_penalty=0.0265 | risk_margin=2.5473 | worst_clearance=-0.2961
+------------------------------------------------------------------------
+[right_bottom_to_left_top] episodes=100 | success=0.0% | collision=100.0% | timeout=0.0%
+reward=-52.63 +- 0.01 | steps=20.0 | final_dist=115.42
+path_len=10.08 | eff=0.09x | path_smooth=0.1144 | ctrl_smooth=0.0054
+unc_penalty=0.0000 | risk_margin=2.5509 | worst_clearance=6.6048
+------------------------------------------------------------------------
+[right_top_to_left_bottom] episodes=100 | success=0.0% | collision=100.0% | timeout=0.0%
+reward=-60.19 +- 0.07 | steps=15.0 | final_dist=118.26
+path_len=7.76 | eff=0.07x | path_smooth=0.0209 | ctrl_smooth=0.0041
+unc_penalty=0.0000 | risk_margin=2.5526 | worst_clearance=5.8980
+------------------------------------------------------------------------
+[overall] episodes=400 | success=0.0% | collision=100.0% | timeout=0.0%
+reward=-39.79 +- 17.93 | steps=20.7 | final_dist=109.30
+path_len=10.81 | eff=0.10x | path_smooth=0.0657 | ctrl_smooth=0.0044
+unc_penalty=0.0067 | risk_margin=2.5503 | worst_clearance=-0.2961
+------------------------------------------------------------------------
