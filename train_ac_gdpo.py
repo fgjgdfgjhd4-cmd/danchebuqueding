@@ -42,8 +42,9 @@ CONFIG = {
     "DEVICE": "cuda" if torch.cuda.is_available() else "cpu",
     "VISUALIZE_FREQ": 10,         # 可视化频率
     "SAVE_DIR": "./results",
+    "RUN_NOTE": "",
     "USE_DSA_MASK": True,
-    "DSA_CONFIG": make_dsa_config(floor_gain=0.25),
+    "DSA_CONFIG": make_dsa_config(surprise_gain=0.30),
 
     "STAGE_ONE_EPISODE": 100,
     "STAGE_TWO_EPISODE": 400,
@@ -115,6 +116,10 @@ def train():
     run_name = f"AC_GDPO_Curriculum_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     log_dir = os.path.join(CONFIG["SAVE_DIR"], run_name)
     os.makedirs(log_dir, exist_ok=True)
+    note = str(CONFIG.get("RUN_NOTE", "")).strip()
+    if note:
+        with open(os.path.join(log_dir, "run_note.txt"), "w", encoding="utf-8") as f:
+            f.write(note + "\n")
     if CONFIG["USE_DSA_MASK"]:
         dsa_config_path = save_dsa_config(CONFIG["DSA_CONFIG"], log_dir)
         print(f"--- DSA config saved to: {dsa_config_path} ---")

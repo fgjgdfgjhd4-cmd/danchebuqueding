@@ -16,7 +16,7 @@ from rmmf_model import build_rmmf_model_from_state_dict
 
 
 CONFIG = {
-    "MODEL_PATH": "results/AC_GDPO_Curriculum_20260427_230049/best_stage4_model.pth",
+    "MODEL_PATH": "results/AC_GDPO_Curriculum_20260429_105822/best_stage4_model.pth",
     "HIDDEN_DIM": 128,
     "MAX_STEPS": 1000,
     "DEVICE": "cuda" if torch.cuda.is_available() else "cpu",
@@ -24,16 +24,17 @@ CONFIG = {
     "RENDER_DELAY": 0.02,
     "FIXED_REPEATS": 100,
     "OUTPUT_DIR": "eval_reports",
+    "RUN_NOTE": " surprise_gain=0.30；其他保持基线作用：看“突变 beam 响应”减弱后，抖动是否下降",
     "DSA_CONFIG": make_dsa_config(
-        floor_gain=0.25,
-    target_sigma=np.pi / 4.0,
-    motion_sigma=np.pi / 3.5,
-    surprise_gain=0.60,
-    turn_side_gain=0.18,
-    ema_decay=0.70,
     ),
 }
 
+# floor_gain=0.25,
+#     target_sigma=np.pi / 4.0,
+#     motion_sigma=np.pi / 3.5,
+#     surprise_gain=0.60,
+#     turn_side_gain=0.18,
+#     ema_decay=0.70,
 
 def build_agent():
     if not os.path.exists(CONFIG["MODEL_PATH"]):
@@ -83,6 +84,7 @@ def main():
         render_delay=CONFIG["RENDER_DELAY"],
         fixed_repeats=CONFIG["FIXED_REPEATS"],
         output_dir=CONFIG["OUTPUT_DIR"],
+        run_note=CONFIG["RUN_NOTE"],
     )
 
     active_masker = {"obj": None}

@@ -1,0 +1,8 @@
+{
+  "floor_gain": 0.35,
+  "target_sigma": 0.7853981633974483,
+  "motion_sigma": 0.8975979010256552,
+  "surprise_gain": 0.3,
+  "turn_side_gain": 0.18,
+  "ema_decay": 0.7
+}

@@ -19,6 +19,7 @@ CONFIG = {
     "RENDER_DELAY": 0.02,
     "FIXED_REPEATS": 100,
     "OUTPUT_DIR": "eval_reports",
+    "RUN_NOTE": "",
 }
 
 
@@ -58,6 +59,7 @@ def main():
         render_delay=CONFIG["RENDER_DELAY"],
         fixed_repeats=CONFIG["FIXED_REPEATS"],
         output_dir=CONFIG["OUTPUT_DIR"],
+        run_note=CONFIG["RUN_NOTE"],
     )
 
     def policy_runner(obs: np.ndarray, hidden_state: torch.Tensor):

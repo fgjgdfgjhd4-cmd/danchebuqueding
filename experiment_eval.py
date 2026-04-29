@@ -24,6 +24,7 @@ class ExperimentConfig:
     render_delay: float = 0.02
     fixed_repeats: int = 100
     output_dir: str = "eval_reports"
+    run_note: str = ""
 
 
 FIXED_TASKS: List[Task] = [
@@ -343,6 +344,7 @@ def run_experiment(
     episodes_path = os.path.join(run_dir, "episodes.csv")
     summary_csv_path = os.path.join(run_dir, "summary.csv")
     summary_txt_path = os.path.join(run_dir, "summary.txt")
+    note_path = os.path.join(run_dir, "run_note.txt")
 
     write_csv(episodes_path, results)
     write_summary_csv(summary_csv_path, summary)
@@ -350,5 +352,8 @@ def run_experiment(
     summary_text = format_summary_table(summary, f"{experiment_name} EVALUATION REPORT")
     with open(summary_txt_path, "w", encoding="utf-8") as f:
         f.write(summary_text + "\n")
-
+    note = str(config.run_note).strip()
+    if note:
+        with open(note_path, "w", encoding="utf-8") as f:
+            f.write(note + "\n")
     return results, summary, run_dir
